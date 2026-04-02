@@ -1,0 +1,24 @@
+# Виртуальное окружение Python
+.venv/
+venv/
+env/
+
+# Переменные окружения с секретами
+.env
+
+# Кэш и артефакты
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Логи приложения (генерируются при работе)
+log/*.log
+!log/.gitkeep
+
+# IDE
+.idea/
+.vscode/
+*.swp
