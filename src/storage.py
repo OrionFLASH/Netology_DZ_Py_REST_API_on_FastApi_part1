@@ -1,9 +1,7 @@
 """
 In-memory хранилище объявлений с блокировкой для потокобезопасности.
 
-Для учебного задания достаточно оперативной памяти; при перезапуске процесса
-данные не сохраняются. Структура изолирована, чтобы при необходимости заменить
-реализацию на БД без изменения контрактов HTTP.
+Каждое объявление привязано к владельцу (`owner_user_id`) для проверки прав в части 2.
 """
 
 from __future__ import annotations
@@ -16,7 +14,7 @@ from typing import Optional
 from uuid import uuid4
 
 from src.logging_setup import log_debug
-from src.schemas import AdvertisementCreate, AdvertisementUpdate
+from src.schemas import AdvertisementUpdate
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -36,7 +34,8 @@ class AdvertisementRecord:
         title: заголовок.
         description: описание.
         price: цена.
-        author: автор.
+        author: отображаемое имя автора (для ответов и поиска).
+        owner_user_id: id пользователя-владельца (для прав доступа).
         created_at: момент создания в UTC.
     """
 
@@ -45,6 +44,7 @@ class AdvertisementRecord:
     description: str
     price: float
     author: str
+    owner_user_id: str
     created_at: datetime
 
 
@@ -61,16 +61,25 @@ class AdvertisementStore:
         self._lock: threading.RLock = threading.RLock()
         self._by_id: dict[str, AdvertisementRecord] = {}
 
-    def create(self, payload: AdvertisementCreate) -> AdvertisementRecord:
+    def create(
+        self,
+        *,
+        title: str,
+        description: str,
+        price: float,
+        author_display: str,
+        owner_user_id: str,
+    ) -> AdvertisementRecord:
         """Создаёт новое объявление и возвращает полную запись."""
         with self._lock:
             new_id: str = str(uuid4())
             record: AdvertisementRecord = AdvertisementRecord(
                 id=new_id,
-                title=payload.title,
-                description=payload.description,
-                price=payload.price,
-                author=payload.author,
+                title=title,
+                description=description,
+                price=price,
+                author=author_display,
+                owner_user_id=owner_user_id,
                 created_at=_utc_now(),
             )
             self._by_id[new_id] = record
@@ -116,6 +125,7 @@ class AdvertisementStore:
                 description=str(data["description"]),
                 price=float(data["price"]),
                 author=str(data["author"]),
+                owner_user_id=current.owner_user_id,
                 created_at=current.created_at,
             )
             self._by_id[advertisement_id] = updated
@@ -142,6 +152,35 @@ class AdvertisementStore:
             )
             logger.info("Удалено объявление id=%s", advertisement_id)
             return True
+
+    def delete_by_owner(self, owner_user_id: str) -> int:
+        """
+        Удаляет все объявления указанного владельца (при удалении пользователя).
+
+        Returns:
+            Количество удалённых записей.
+        """
+        with self._lock:
+            to_remove: list[str] = [
+                adv_id
+                for adv_id, rec in self._by_id.items()
+                if rec.owner_user_id == owner_user_id
+            ]
+            for adv_id in to_remove:
+                del self._by_id[adv_id]
+            if to_remove:
+                log_debug(
+                    logger,
+                    f"Удалены объявления владельца {owner_user_id}: {len(to_remove)} шт.",
+                    class_name="AdvertisementStore",
+                    def_name="delete_by_owner",
+                )
+                logger.info(
+                    "Удалено объявлений владельца %s: %s",
+                    owner_user_id,
+                    len(to_remove),
+                )
+            return len(to_remove)
 
     def search(
         self,

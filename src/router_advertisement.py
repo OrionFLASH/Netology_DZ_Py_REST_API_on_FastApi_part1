@@ -1,7 +1,7 @@
 """
-HTTP-маршруты объявлений: CRUD и поиск по query string.
+HTTP-маршруты объявлений: чтение и поиск без токена; создание/изменение/удаление с JWT.
 
-Пути и методы соответствуют формулировке задания Netology (без аутентификации).
+Права по заданию Netology часть 2: владелец или admin для изменения объявлений.
 """
 
 import logging
@@ -10,6 +10,7 @@ from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
+from src.deps import CurrentUser, get_advertisement_store, require_current_user
 from src.logging_setup import log_debug
 from src.schemas import (
     AdvertisementCreate,
@@ -17,16 +18,12 @@ from src.schemas import (
     AdvertisementRead,
     AdvertisementUpdate,
 )
-from src.storage import AdvertisementRecord, AdvertisementStore, store
+from src.storage import AdvertisementRecord, AdvertisementStore
+from src.user_storage import UserRole
 
 logger: logging.Logger = logging.getLogger(__name__)
 
 router: APIRouter = APIRouter()
-
-
-def get_store() -> AdvertisementStore:
-    """Зависимость FastAPI: возвращает общее хранилище объявлений."""
-    return store
 
 
 def _to_read(record: AdvertisementRecord) -> AdvertisementRead:
@@ -41,6 +38,20 @@ def _to_read(record: AdvertisementRecord) -> AdvertisementRead:
     )
 
 
+def _ensure_ad_owner_or_admin(
+    record: AdvertisementRecord,
+    current: CurrentUser,
+) -> None:
+    """Проверяет право менять/удалять объявление (владелец или admin)."""
+    if current.role == UserRole.admin:
+        return
+    if record.owner_user_id != current.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Недостаточно прав для операции с этим объявлением",
+        )
+
+
 @router.post(
     "/advertisement",
     response_model=AdvertisementRead,
@@ -49,16 +60,34 @@ def _to_read(record: AdvertisementRecord) -> AdvertisementRead:
 )
 def create_advertisement(
     body: AdvertisementCreate,
-    repo: Annotated[AdvertisementStore, Depends(get_store)],
+    repo: Annotated[AdvertisementStore, Depends(get_advertisement_store)],
+    current: Annotated[CurrentUser, Depends(require_current_user)],
 ) -> AdvertisementRead:
-    """Создаёт объявление; дата создания и id назначаются сервером."""
+    """
+    Только для авторизованных пользователей (группа user или admin).
+
+    Отображаемый автор: по умолчанию логин текущего пользователя; администратор
+    может передать поле `author` явно.
+    """
     log_debug(
         logger,
         "Запрос POST /advertisement",
         class_name="router_advertisement",
         def_name="create_advertisement",
     )
-    created: AdvertisementRecord = repo.create(body)
+    author_display: str
+    if current.role == UserRole.admin and body.author:
+        author_display = body.author
+    else:
+        author_display = current.username
+
+    created: AdvertisementRecord = repo.create(
+        title=body.title,
+        description=body.description,
+        price=body.price,
+        author_display=author_display,
+        owner_user_id=current.id,
+    )
     return _to_read(created)
 
 
@@ -70,15 +99,29 @@ def create_advertisement(
 def patch_advertisement(
     advertisement_id: str,
     body: AdvertisementUpdate,
-    repo: Annotated[AdvertisementStore, Depends(get_store)],
+    repo: Annotated[AdvertisementStore, Depends(get_advertisement_store)],
+    current: Annotated[CurrentUser, Depends(require_current_user)],
 ) -> AdvertisementRead:
-    """Частичное обновление полей объявления по идентификатору."""
+    """Владелец объявления или администратор; смена `author` — только admin."""
     log_debug(
         logger,
         f"Запрос PATCH /advertisement/{advertisement_id}",
         class_name="router_advertisement",
         def_name="patch_advertisement",
     )
+    record: Optional[AdvertisementRecord] = repo.get(advertisement_id)
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Объявление не найдено",
+        )
+    _ensure_ad_owner_or_admin(record, current)
+    if body.author is not None and body.author != record.author:
+        if current.role != UserRole.admin:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Недостаточно прав для смены автора объявления",
+            )
     updated: Optional[AdvertisementRecord] = repo.update(advertisement_id, body)
     if updated is None:
         raise HTTPException(
@@ -95,15 +138,23 @@ def patch_advertisement(
 )
 def delete_advertisement(
     advertisement_id: str,
-    repo: Annotated[AdvertisementStore, Depends(get_store)],
+    repo: Annotated[AdvertisementStore, Depends(get_advertisement_store)],
+    current: Annotated[CurrentUser, Depends(require_current_user)],
 ) -> None:
-    """Удаляет объявление по идентификатору."""
+    """Владелец объявления или администратор."""
     log_debug(
         logger,
         f"Запрос DELETE /advertisement/{advertisement_id}",
         class_name="router_advertisement",
         def_name="delete_advertisement",
     )
+    record: Optional[AdvertisementRecord] = repo.get(advertisement_id)
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Объявление не найдено",
+        )
+    _ensure_ad_owner_or_admin(record, current)
     if not repo.delete(advertisement_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -117,7 +168,7 @@ def delete_advertisement(
     summary="Поиск объявлений",
 )
 def search_advertisements(
-    repo: Annotated[AdvertisementStore, Depends(get_store)],
+    repo: Annotated[AdvertisementStore, Depends(get_advertisement_store)],
     title: Annotated[
         Optional[str],
         Query(description="Подстрока в заголовке (без учёта регистра)"),
@@ -148,7 +199,7 @@ def search_advertisements(
     ] = None,
 ) -> AdvertisementListResponse:
     """
-    Поиск по полям через query string.
+    Поиск по полям через query string (доступно без токена).
 
     Указанные фильтры объединяются по логике «И». Без параметров возвращаются
     все объявления, имеющиеся в хранилище.
@@ -179,9 +230,9 @@ def search_advertisements(
 )
 def get_advertisement(
     advertisement_id: str,
-    repo: Annotated[AdvertisementStore, Depends(get_store)],
+    repo: Annotated[AdvertisementStore, Depends(get_advertisement_store)],
 ) -> AdvertisementRead:
-    """Возвращает одно объявление по идентификатору."""
+    """Доступно без токена."""
     log_debug(
         logger,
         f"Запрос GET /advertisement/{advertisement_id}",

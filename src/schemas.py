@@ -1,8 +1,7 @@
 """
-Pydantic-схемы для тела запросов и ответов API объявлений.
+Pydantic-схемы для тел запросов и ответов API (объявления, пользователи, токен).
 
-Соответствуют полям из задания: заголовок, описание, цена, автор, дата создания.
-Идентификатор объявления генерируется на сервере при создании.
+Объявления: поля из части 1 задания. Пользователи и JWT — из части 2.
 """
 
 from datetime import datetime
@@ -10,12 +9,15 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+from src.user_storage import UserRole
+
 
 class AdvertisementCreate(BaseModel):
     """
     Данные для создания объявления (POST /advertisement).
 
-    Поля `created_at` и идентификатор в запрос не входят — задаются сервером.
+    Поле `author` опционально: для обычного пользователя подставляется его логин;
+    администратор может указать отображаемое имя автора явно.
     """
 
     title: str = Field(..., min_length=1, max_length=500, description="Заголовок объявления")
@@ -23,9 +25,14 @@ class AdvertisementCreate(BaseModel):
         ..., min_length=1, max_length=8000, description="Текстовое описание"
     )
     price: float = Field(..., ge=0, description="Цена (неотрицательное число)")
-    author: str = Field(..., min_length=1, max_length=200, description="Автор объявления")
+    author: Optional[str] = Field(
+        None,
+        min_length=1,
+        max_length=200,
+        description="Отображаемый автор (опционально; по умолчанию — логин создателя)",
+    )
 
-    @field_validator("title", "description", "author", mode="before")
+    @field_validator("title", "description", mode="before")
     @classmethod
     def strip_strings(cls, value: object) -> object:
         """Убирает лишние пробелы по краям строковых полей."""
@@ -33,12 +40,22 @@ class AdvertisementCreate(BaseModel):
             return value.strip()
         return value
 
+    @field_validator("author", mode="before")
+    @classmethod
+    def strip_author(cls, value: object) -> object:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            s: str = value.strip()
+            return s if s else None
+        return value
+
 
 class AdvertisementUpdate(BaseModel):
     """
     Частичное обновление объявления (PATCH /advertisement/{id}).
 
-    Все поля необязательны: передаются только изменяемые атрибуты.
+    Изменение поля `author` разрешено только администратору (проверка в роутере).
     """
 
     title: Optional[str] = Field(None, min_length=1, max_length=500)
@@ -74,3 +91,57 @@ class AdvertisementListResponse(BaseModel):
 
     items: list[AdvertisementRead] = Field(default_factory=list)
     total: int = Field(..., ge=0, description="Количество найденных записей")
+
+
+class UserCreate(BaseModel):
+    """Регистрация пользователя (POST /user)."""
+
+    username: str = Field(..., min_length=1, max_length=100)
+    password: str = Field(..., min_length=1, max_length=200)
+    role: UserRole = Field(
+        default=UserRole.user,
+        description="Роль: задать `admin` может только действующий администратор",
+    )
+
+    @field_validator("username", mode="before")
+    @classmethod
+    def strip_username(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+
+class UserUpdate(BaseModel):
+    """Частичное обновление пользователя (PATCH /user/{user_id})."""
+
+    password: Optional[str] = Field(None, min_length=1, max_length=200)
+    role: Optional[UserRole] = None
+
+
+class UserRead(BaseModel):
+    """Пользователь в ответах API (без пароля)."""
+
+    id: str
+    username: str
+    role: UserRole
+
+
+class LoginRequest(BaseModel):
+    """Тело запроса входа (POST /login)."""
+
+    username: str
+    password: str
+
+    @field_validator("username", mode="before")
+    @classmethod
+    def strip_login(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+
+class TokenResponse(BaseModel):
+    """Ответ с JWT после успешного входа."""
+
+    access_token: str = Field(..., description="JWT, срок действия задаётся на сервере (48 ч)")
+    token_type: str = Field(default="bearer")
