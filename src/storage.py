@@ -12,7 +12,7 @@ import logging
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Iterator, Optional
+from typing import Optional
 from uuid import uuid4
 
 from src.logging_setup import log_debug
@@ -189,12 +189,6 @@ class AdvertisementStore:
             )
             logger.info("Поиск объявлений: найдено %s записей", len(result))
             return result
-
-    def iter_all(self) -> Iterator[AdvertisementRecord]:
-        """Итератор по всем записям (снимок под блокировкой)."""
-        with self._lock:
-            for r in list(self._by_id.values()):
-                yield r
 
 
 # Единственный экземпляр хранилища на процесс (dependency в FastAPI)
